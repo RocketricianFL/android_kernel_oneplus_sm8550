@@ -1,8 +1,9 @@
-name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
+name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter + Manager)
 
 on:
   push:
     branches: [ "16.0" ]
+    tags: [ "v*" ]
   workflow_dispatch:
 
 jobs:
@@ -29,28 +30,40 @@ jobs:
           path: clang-toolchain
           fetch-depth: 1
 
-      - name: Move Clang Toolchain
+      - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
       - name: Integrate KernelSU-Next
-        run: curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        run: |
+          git clone https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+          cd KernelSU-Next
+          LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null || echo "")
+          if [ -n "$LATEST_TAG" ]; then
+            git checkout "$LATEST_TAG"
+          fi
+          cd ..
+          ln -sf "$(pwd)/KernelSU-Next/kernel" drivers/kernelsu
+          grep -q "drivers/kernelsu" drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
       - name: Integrate SUSFS (5.15)
         run: |
-          git clone --depth=1 -b kernel-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu || git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-          patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.15.patch || true
-          if [ -d KernelSU-Next ]; then
-            patch -d KernelSU-Next -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
-          elif [ -d drivers/kernelsu ]; then
-            patch -d drivers/kernelsu -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          KERNEL_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_*.patch" | head -n 1)
+          echo "Applying kernel patch: $KERNEL_PATCH"
+          patch -p1 --fuzz=3 < "$KERNEL_PATCH" || true
+          KSU_PATCH=$(find ../susfs4ksu/kernel_patches -path "*KernelSU*" -name "10_enable_susfs_*.patch" | head -n 1)
+          echo "Applying KSU patch: $KSU_PATCH"
+          if [ -n "$KSU_PATCH" ]; then
+            patch -d KernelSU-Next -p1 --fuzz=3 < "$KSU_PATCH" || true
           fi
 
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
           git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'patch -p1 --fuzz=3 < "$1" || true' _ {} \;
+          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'echo "Applying $1"; patch -p1 --fuzz=3 < "$1" || true' _ {} \;
 
       - name: Stub Out External Oplus Kconfig References
         run: |
@@ -58,44 +71,38 @@ jobs:
           import os
 
           for root, _, files in os.walk('.'):
-              if '/.git' in root or root.startswith('./out'):
+              if './out' in root or './.git' in root or './KernelSU-Next' in root:
                   continue
               for fname in files:
                   if not fname.startswith('Kconfig'):
                       continue
                   fpath = os.path.join(root, fname)
-                  try:
-                      with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
-                          lines = f.readlines()
-                  except Exception:
-                      continue
+                  with open(fpath, 'r', errors='ignore') as f:
+                      lines = f.readlines()
                   changed = False
                   new_lines = []
                   for line in lines:
                       indent = len(line) - len(line.lstrip())
                       stripped = line.strip()
-                      if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ') or stripped.startswith('source\t') or stripped.startswith('rsource\t')):
+                      if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ')):
                           parts = stripped.split(None, 1)
                           if len(parts) == 2:
-                              inc = parts[1].split('#')[0].strip().strip('"').strip("'")
-                              if parts[0] == 'rsource':
-                                  target = os.path.join(root, inc)
-                              else:
-                                  target = inc
-                              if not os.path.exists(target):
+                              target = parts[1].strip('"').strip("'").split('#')[0].strip()
+                              check_path = os.path.join(root, target) if stripped.startswith('rsource ') else target
+                              if not os.path.exists(check_path) and not os.path.exists(target):
                                   new_lines.append('# ' + line)
                                   changed = True
                                   continue
                       new_lines.append(line)
                   if changed:
-                      with open(fpath, 'w', encoding='utf-8') as f:
+                      with open(fpath, 'w') as f:
                           f.writelines(new_lines)
           PYEOF
 
       - name: Configure Kernel Defconfig
         run: |
-          export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
           mkdir -p out
+          export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
           if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
             ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
           else
@@ -104,30 +111,12 @@ jobs:
           ./scripts/config --file out/.config -e KSU -e KPROBES -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT -e ATH9K_HTC -e ATH10K -e RT2800USB -e RTL8187 -e RTL88XXAU -e MT7601U -e MT76x2U -e BT_HCIBTUSB -e BT_HCIUART -e USB_SERIAL -e USB_SERIAL_CH341 -e USB_SERIAL_CP210X -e USB_SERIAL_FTDI_SIO -e USB_ACM -e USB_USBNET -e USB_NET_AX8817X -e USB_NET_AX88179_178A -e USB_RTL8152
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: Compile Kernel Image (Single-Threaded on Error for Clear Diagnostics)
+      - name: Compile Kernel Image
         run: |
           export PATH="$HOME/clang/bin:$PATH"
           if ! make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image; then
-            echo "=== Parallel build failed! Re-running with -j1 to pinpoint exact error ==="
+            echo "=== Multi-core build failed, running single-threaded to expose exact error ==="
             make -j1 O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image
-          fi
-
-      - name: Build KernelSU-Next Manager APK
-        run: |
-          KSU_DIR=""
-          if [ -d KernelSU-Next/manager ]; then
-            KSU_DIR="KernelSU-Next/manager"
-          elif [ -d drivers/kernelsu/../manager ]; then
-            KSU_DIR="$(realpath drivers/kernelsu/../manager)"
-          fi
-          if [ -n "$KSU_DIR" ] && [ -f "$KSU_DIR/gradlew" ]; then
-            cd "$KSU_DIR"
-            chmod +x gradlew
-            ./gradlew assembleRelease || ./gradlew assembleDebug || true
-            APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
-            if [ -n "$APK_PATH" ]; then
-              cp "$APK_PATH" "$GITHUB_WORKSPACE/KernelSU-Next-Manager.apk"
-            fi
           fi
 
       - name: Package into AnyKernel3
@@ -141,6 +130,19 @@ jobs:
           rm -rf .git
           zip -r9 ../OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip *
 
+      - name: Build KernelSU-Next Manager APK
+        run: |
+          if [ -d KernelSU-Next/manager ]; then
+            cd KernelSU-Next/manager
+            chmod +x gradlew
+            ./gradlew assembleRelease || ./gradlew assembleDebug || true
+            APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
+            if [ -n "$APK_PATH" ]; then
+              cp "$APK_PATH" ../../KernelSU-Next-Manager.apk
+            fi
+            cd ../..
+          fi
+
       - name: Upload Kernel & Manager Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -149,4 +151,12 @@ jobs:
             OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
             KernelSU-Next-Manager.apk
           if-no-files-found: warn
-          
+
+      - name: Publish GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+            KernelSU-Next-Manager.apk
+            
