@@ -13,7 +13,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
 
       - name: Install Build Dependencies
-        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole
+        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole openjdk-17-jdk
 
       - name: Checkout crDroid 16.0 Kernel Source
         uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
           path: clang-toolchain
           fetch-depth: 1
 
-      - name: Link Clang Toolchain
+      - name: Move Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
       - name: Integrate KernelSU-Next
@@ -50,10 +50,7 @@ jobs:
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
           git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" | while read -r p; do
-            echo "Applying $p..."
-            patch -p1 --fuzz=3 < "$p" || true
-          done
+          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'patch -p1 --fuzz=3 < "$1" || true' _ {} \;
 
       - name: Stub Out External Oplus Kconfig References
         run: |
@@ -61,32 +58,38 @@ jobs:
           import os
 
           for root, _, files in os.walk('.'):
-              if '.git' in root:
+              if '/.git' in root or root.startswith('./out'):
                   continue
-              for f in files:
-                  if f.startswith('Kconfig'):
-                      path = os.path.join(root, f)
-                      with open(path, 'r', encoding='utf-8', errors='ignore') as fp:
-                          lines = fp.readlines()
-                      changed = False
-                      new_lines = []
-                      for line in lines:
-                          stripped = line.lstrip()
-                          indent = len(line) - len(stripped)
-                          # Only inspect unindented (top-level) source/rsource directives
-                          if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ')):
-                              parts = stripped.split(None, 1)
-                              if len(parts) == 2:
-                                  inc = parts[1].split('#')[0].strip().strip('"').strip("'")
-                                  target = os.path.join(root, inc) if stripped.startswith('rsource ') else inc
-                                  if inc and not os.path.exists(target):
-                                      new_lines.append('# ' + line)
-                                      changed = True
-                                      continue
-                          new_lines.append(line)
-                      if changed:
-                          with open(path, 'w', encoding='utf-8') as fp:
-                              fp.writelines(new_lines)
+              for fname in files:
+                  if not fname.startswith('Kconfig'):
+                      continue
+                  fpath = os.path.join(root, fname)
+                  try:
+                      with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                          lines = f.readlines()
+                  except Exception:
+                      continue
+                  changed = False
+                  new_lines = []
+                  for line in lines:
+                      indent = len(line) - len(line.lstrip())
+                      stripped = line.strip()
+                      if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ') or stripped.startswith('source\t') or stripped.startswith('rsource\t')):
+                          parts = stripped.split(None, 1)
+                          if len(parts) == 2:
+                              inc = parts[1].split('#')[0].strip().strip('"').strip("'")
+                              if parts[0] == 'rsource':
+                                  target = os.path.join(root, inc)
+                              else:
+                                  target = inc
+                              if not os.path.exists(target):
+                                  new_lines.append('# ' + line)
+                                  changed = True
+                                  continue
+                      new_lines.append(line)
+                  if changed:
+                      with open(fpath, 'w', encoding='utf-8') as f:
+                          f.writelines(new_lines)
           PYEOF
 
       - name: Configure Kernel Defconfig
@@ -101,10 +104,31 @@ jobs:
           ./scripts/config --file out/.config -e KSU -e KPROBES -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT -e ATH9K_HTC -e ATH10K -e RT2800USB -e RTL8187 -e RTL88XXAU -e MT7601U -e MT76x2U -e BT_HCIBTUSB -e BT_HCIUART -e USB_SERIAL -e USB_SERIAL_CH341 -e USB_SERIAL_CP210X -e USB_SERIAL_FTDI_SIO -e USB_ACM -e USB_USBNET -e USB_NET_AX8817X -e USB_NET_AX88179_178A -e USB_RTL8152
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: Compile Kernel Image
+      - name: Compile Kernel Image (Single-Threaded on Error for Clear Diagnostics)
         run: |
           export PATH="$HOME/clang/bin:$PATH"
-          make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image
+          if ! make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image; then
+            echo "=== Parallel build failed! Re-running with -j1 to pinpoint exact error ==="
+            make -j1 O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image
+          fi
+
+      - name: Build KernelSU-Next Manager APK
+        run: |
+          KSU_DIR=""
+          if [ -d KernelSU-Next/manager ]; then
+            KSU_DIR="KernelSU-Next/manager"
+          elif [ -d drivers/kernelsu/../manager ]; then
+            KSU_DIR="$(realpath drivers/kernelsu/../manager)"
+          fi
+          if [ -n "$KSU_DIR" ] && [ -f "$KSU_DIR/gradlew" ]; then
+            cd "$KSU_DIR"
+            chmod +x gradlew
+            ./gradlew assembleRelease || ./gradlew assembleDebug || true
+            APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
+            if [ -n "$APK_PATH" ]; then
+              cp "$APK_PATH" "$GITHUB_WORKSPACE/KernelSU-Next-Manager.apk"
+            fi
+          fi
 
       - name: Package into AnyKernel3
         run: |
@@ -117,9 +141,12 @@ jobs:
           rm -rf .git
           zip -r9 ../OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip *
 
-      - name: Upload Kernel Artifact
+      - name: Upload Kernel & Manager Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: OP11-crDroid12-KSUNext-SUSFS-NetHunter
-          path: OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+          path: |
+            OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+            KernelSU-Next-Manager.apk
+          if-no-files-found: warn
           
