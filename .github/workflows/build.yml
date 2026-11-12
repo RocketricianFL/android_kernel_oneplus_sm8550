@@ -18,7 +18,7 @@ jobs:
       - name: Checkout crDroid 16.0 Kernel Source
         uses: actions/checkout@v4
         with:
-          ref: 16.0
+          ref: "16.0"
           submodules: recursive
           depth: 1
 
