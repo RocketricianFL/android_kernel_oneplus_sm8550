@@ -24,10 +24,8 @@ jobs:
       
       - name: Download AOSP Clang Toolchain
         run: |
-          mkdir -p $HOME/clang && cd $HOME/clang
-          CLANG_URL=$(curl -s https://github.com | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
-          wget -q "$CLANG_URL" -O clang.tar.gz
-          tar -xzf clang.tar.gz && rm clang.tar.gz
+          git clone --depth=1 https://gitlab.com $HOME/clang || \
+          git clone --depth=1 https://github.com $HOME/clang
 
       - name: Integrate KernelSU-Next
         run: curl -LSs "https://githubusercontent.com" | bash -s next
