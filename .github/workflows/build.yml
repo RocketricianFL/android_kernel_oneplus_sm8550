@@ -1,4 +1,4 @@
-name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
+name: Build OP11 crDroid 16.0 Kernel
 
 on:
   push:
@@ -22,6 +22,18 @@ jobs:
           submodules: recursive
           depth: 1
 
+      - name: Clone External Oplus Kernel Modules
+        run: |
+          if [ ! -d kernel/oplus_cpu ]; then
+            git clone --depth=1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git ../oplus-modules || true
+            if [ -d ../oplus-modules ]; then
+              cp -rn ../oplus-modules/* . || true
+            fi
+          fi
+          if [ ! -f kernel/oplus_cpu/thermal/Kconfig ]; then
+            sed -i '/oplus_cpu\/thermal\/Kconfig/d' init/Kconfig
+          fi
+
       - name: Download Proton Clang Toolchain
         uses: actions/checkout@v4
         with:
@@ -29,7 +41,7 @@ jobs:
           path: clang-toolchain
           depth: 1
 
-      - name: Move Clang Toolchain
+      - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
       - name: Integrate KernelSU-Next
@@ -59,7 +71,7 @@ jobs:
           if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
             ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
           else
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+            make O=out ARCH=arm64 gki_defconfig
           fi
           ./scripts/config --file out/.config -e KSU -e KPROBES -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT -e ATH9K_HTC -e ATH10K -e RT2800USB -e RTL8187 -e RTL88XXAU -e MT7601U -e MT76x2U -e BT_HCIBTUSB -e BT_HCIUART -e USB_SERIAL -e USB_SERIAL_CH341 -e USB_SERIAL_CP210X -e USB_SERIAL_FTDI_SIO -e USB_ACM -e USB_USBNET -e USB_NET_AX8817X -e USB_NET_AX88179_178A -e USB_RTL8152
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
