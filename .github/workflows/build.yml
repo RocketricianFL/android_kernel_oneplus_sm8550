@@ -2,8 +2,7 @@ name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
 
 on:
   push:
-    branches:
-      - "16.0"
+    branches: [ "16.0" ]
   workflow_dispatch:
 
 jobs:
@@ -13,7 +12,7 @@ jobs:
       - name: Maximize Runner Disk Space
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
 
-      - name: Install Build Dependencies
+      - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole
 
       - name: Checkout crDroid 16.0 Kernel Source
@@ -30,7 +29,7 @@ jobs:
           path: clang-toolchain
           fetch-depth: 1
 
-      - name: Setup Clang Path
+      - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
       - name: Integrate KernelSU-Next
@@ -51,43 +50,36 @@ jobs:
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
           git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" | sort | while read -r p; do
-            echo "Applying $p..."
-            patch -p1 --fuzz=3 < "$p" || true
-          done
+          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'echo "Applying $1"; patch -p1 --fuzz=3 < "$1" || true' _ {} \;
 
       - name: Stub Out External Oplus Kconfig References
         run: |
           python3 - << 'PYEOF'
           import os, re
-          pattern = re.compile(r'^\s*(?:source|rsource)\s+["']?([^"'\s#]+)["']?')
+          pat = re.compile(r'^\s*(?:source|rsource)\s+["\']?([^"\'\s#]+)["\']?')
           for root, _, files in os.walk('.'):
-              if root.startswith('./.git') or root.startswith('./out'):
+              if '/.git' in root or root.startswith('./out'):
                   continue
               for f in files:
                   if 'Kconfig' in f:
-                      fpath = os.path.join(root, f)
-                      try:
-                          with open(fpath, 'r', encoding='utf-8', errors='ignore') as fp:
-                              lines = fp.readlines()
-                          changed = False
-                          new_lines = []
-                          for line in lines:
-                              m = pattern.match(line)
-                              if m:
-                                  target = m.group(1)
-                                  if '$' not in target:
-                                      rel_target = os.path.join(root, target) if line.lstrip().startswith('rsource') else target
-                                      if not os.path.exists(rel_target):
-                                          new_lines.append('# ' + line)
-                                          changed = True
-                                          continue
-                              new_lines.append(line)
-                          if changed:
-                              with open(fpath, 'w', encoding='utf-8') as fp:
-                                  fp.writelines(new_lines)
-                      except Exception as e:
-                          print(f"Skipping {fpath}: {e}")
+                      fp = os.path.join(root, f)
+                      with open(fp, 'r', errors='ignore') as file:
+                          lines = file.readlines()
+                      changed = False
+                      new_lines = []
+                      for line in lines:
+                          m = pat.match(line)
+                          if m:
+                              ref = m.group(1)
+                              rel_path = os.path.join(root, ref) if 'rsource' in line else ref
+                              if not os.path.exists(rel_path) and not os.path.exists(ref):
+                                  new_lines.append('# ' + line)
+                                  changed = True
+                                  continue
+                          new_lines.append(line)
+                      if changed:
+                          with open(fp, 'w') as file:
+                              file.writelines(new_lines)
           PYEOF
 
       - name: Configure Kernel Defconfig
@@ -123,4 +115,3 @@ jobs:
         with:
           name: OP11-crDroid12-KSUNext-SUSFS-NetHunter
           path: OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
-          
