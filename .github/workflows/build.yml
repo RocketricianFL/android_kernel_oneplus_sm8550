@@ -21,11 +21,12 @@ jobs:
           ref: "16.0"
           submodules: recursive
           depth: 1
-
+      
       - name: Download AOSP Clang Toolchain
         run: |
           mkdir -p $HOME/clang && cd $HOME/clang
-          wget -q https://googlesource.com -O clang.tar.gz
+          CLANG_URL=$(curl -s https://github.com | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          wget -q "$CLANG_URL" -O clang.tar.gz
           tar -xzf clang.tar.gz && rm clang.tar.gz
 
       - name: Integrate KernelSU-Next
