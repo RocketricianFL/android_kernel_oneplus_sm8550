@@ -12,7 +12,7 @@ jobs:
       - name: Maximize Runner Disk Space
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
 
-      - name: Install Dependencies
+      - name: Install Build Dependencies
         run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole
 
       - name: Checkout crDroid 16.0 Kernel Source
@@ -50,36 +50,38 @@ jobs:
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
           git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'echo "Applying $1"; patch -p1 --fuzz=3 < "$1" || true' _ {} \;
+          for p in $(find ../nh-kernel -path "*5.15*" -name "*.patch"); do
+            echo "Applying $p..."
+            patch -p1 --fuzz=3 < "$p" || true
+          done
 
       - name: Stub Out External Oplus Kconfig References
         run: |
           python3 - << 'PYEOF'
           import os, re
-          pat = re.compile(r'^\s*(?:source|rsource)\s+["\']?([^"\'\s#]+)["\']?')
+          pattern = re.compile(r'^(\s*(?:source|rsource)\s+["']?([^"'\s#]+)["']?)')
           for root, _, files in os.walk('.'):
-              if '/.git' in root or root.startswith('./out'):
+              if './.git' in root or './out' in root:
                   continue
               for f in files:
-                  if 'Kconfig' in f:
+                  if f.startswith('Kconfig'):
                       fp = os.path.join(root, f)
-                      with open(fp, 'r', errors='ignore') as file:
-                          lines = file.readlines()
+                      with open(fp, 'r', errors='ignore') as fh:
+                          lines = fh.readlines()
                       changed = False
                       new_lines = []
                       for line in lines:
-                          m = pat.match(line)
+                          m = pattern.match(line)
                           if m:
-                              ref = m.group(1)
-                              rel_path = os.path.join(root, ref) if 'rsource' in line else ref
-                              if not os.path.exists(rel_path) and not os.path.exists(ref):
+                              inc = m.group(2)
+                              if not os.path.exists(inc) and not os.path.exists(os.path.join(root, inc)):
                                   new_lines.append('# ' + line)
                                   changed = True
                                   continue
                           new_lines.append(line)
                       if changed:
-                          with open(fp, 'w') as file:
-                              file.writelines(new_lines)
+                          with open(fp, 'w') as fh:
+                              fh.writelines(new_lines)
           PYEOF
 
       - name: Configure Kernel Defconfig
@@ -115,3 +117,4 @@ jobs:
         with:
           name: OP11-crDroid12-KSUNext-SUSFS-NetHunter
           path: OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+          
