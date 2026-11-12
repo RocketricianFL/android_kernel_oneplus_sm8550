@@ -58,28 +58,34 @@ jobs:
       - name: Stub Out External Oplus Kconfig References
         run: |
           python3 - << 'PYEOF'
-          import os, re
+          import os
+
           for root, _, files in os.walk('.'):
+              if '.git' in root:
+                  continue
               for f in files:
                   if f.startswith('Kconfig'):
-                      p = os.path.join(root, f)
-                      with open(p, 'r', errors='ignore') as fp:
+                      path = os.path.join(root, f)
+                      with open(path, 'r', encoding='utf-8', errors='ignore') as fp:
                           lines = fp.readlines()
-                      new_lines = []
                       changed = False
+                      new_lines = []
                       for line in lines:
-                          s = line.lstrip()
-                          if s.startswith('source ') or s.startswith('rsource '):
-                              parts = s.split(None, 1)
-                              inc = parts[1].split('#')[0].strip().strip('"').strip("'")
-                              rel = os.path.join(os.path.dirname(p), inc)
-                              if not os.path.exists(inc) and not os.path.exists(rel):
-                                  new_lines.append('# ' + line)
-                                  changed = True
-                                  continue
+                          stripped = line.lstrip()
+                          indent = len(line) - len(stripped)
+                          # Only inspect unindented (top-level) source/rsource directives
+                          if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ')):
+                              parts = stripped.split(None, 1)
+                              if len(parts) == 2:
+                                  inc = parts[1].split('#')[0].strip().strip('"').strip("'")
+                                  target = os.path.join(root, inc) if stripped.startswith('rsource ') else inc
+                                  if inc and not os.path.exists(target):
+                                      new_lines.append('# ' + line)
+                                      changed = True
+                                      continue
                           new_lines.append(line)
                       if changed:
-                          with open(p, 'w') as fp:
+                          with open(path, 'w', encoding='utf-8') as fp:
                               fp.writelines(new_lines)
           PYEOF
 
