@@ -2,7 +2,8 @@ name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
 
 on:
   push:
-    branches: [ "16.0" ]
+    branches:
+      - "16.0"
   workflow_dispatch:
 
 jobs:
@@ -20,16 +21,16 @@ jobs:
         with:
           ref: "16.0"
           submodules: recursive
-          depth: 1
+          fetch-depth: 1
 
       - name: Download Proton Clang Toolchain
         uses: actions/checkout@v4
         with:
           repository: kdrag0n/proton-clang
           path: clang-toolchain
-          depth: 1
+          fetch-depth: 1
 
-      - name: Link Clang Toolchain
+      - name: Setup Clang Path
         run: mv clang-toolchain $HOME/clang
 
       - name: Integrate KernelSU-Next
@@ -51,43 +52,47 @@ jobs:
         run: |
           git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
           find ../nh-kernel -path "*5.15*" -name "*.patch" | sort | while read -r p; do
-            echo "Applying NetHunter patch: $p"
+            echo "Applying $p..."
             patch -p1 --fuzz=3 < "$p" || true
           done
+
+      - name: Stub Out External Oplus Kconfig References
+        run: |
+          python3 - << 'PYEOF'
+          import os, re
+          pattern = re.compile(r'^\s*(?:source|rsource)\s+["']?([^"'\s#]+)["']?')
+          for root, _, files in os.walk('.'):
+              if root.startswith('./.git') or root.startswith('./out'):
+                  continue
+              for f in files:
+                  if 'Kconfig' in f:
+                      fpath = os.path.join(root, f)
+                      try:
+                          with open(fpath, 'r', encoding='utf-8', errors='ignore') as fp:
+                              lines = fp.readlines()
+                          changed = False
+                          new_lines = []
+                          for line in lines:
+                              m = pattern.match(line)
+                              if m:
+                                  target = m.group(1)
+                                  if '$' not in target:
+                                      rel_target = os.path.join(root, target) if line.lstrip().startswith('rsource') else target
+                                      if not os.path.exists(rel_target):
+                                          new_lines.append('# ' + line)
+                                          changed = True
+                                          continue
+                              new_lines.append(line)
+                          if changed:
+                              with open(fpath, 'w', encoding='utf-8') as fp:
+                                  fp.writelines(new_lines)
+                      except Exception as e:
+                          print(f"Skipping {fpath}: {e}")
+          PYEOF
 
       - name: Configure Kernel Defconfig
         run: |
           export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
-          git clone --depth=1 -b "16.0" https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git ../oplus-modules || true
-          if [ -d ../oplus-modules ]; then
-            cp -rn ../oplus-modules/* . || true
-          fi
-
-          # Auto-stub any missing external Kconfig files referenced across the entire tree
-          python3 - << 'PYEOF'
-          import os, re
-          for root, _, files in os.walk('.'):
-              if '/.' in root or root.startswith('./out'):
-                  continue
-              for fname in files:
-                  if fname.startswith('Kconfig'):
-                      fpath = os.path.join(root, fname)
-                      try:
-                          with open(fpath, 'r', errors='ignore') as f:
-                              lines = f.readlines()
-                          for line in lines:
-                              m = re.match(r'^\s*(?:source|rsource|osource)\s+["\']?([^"\'#\s]+)["\']?', line)
-                              if m:
-                                  inc = m.group(1)
-                                  target = os.path.join(root, inc) if 'rsource' in line else inc
-                                  if not os.path.exists(target) and not '$' in target:
-                                      os.makedirs(os.path.dirname(target), exist_ok=True)
-                                      open(target, 'a').close()
-                                      print(f"Stubbed missing Kconfig: {target}")
-                      except Exception:
-                          pass
-          PYEOF
-
           mkdir -p out
           if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
             ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
@@ -118,4 +123,4 @@ jobs:
         with:
           name: OP11-crDroid12-KSUNext-SUSFS-NetHunter
           path: OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
-
+          
