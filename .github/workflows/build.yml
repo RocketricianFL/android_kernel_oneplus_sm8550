@@ -1,0 +1,82 @@
+name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
+
+on:
+  push:
+    branches: [ "16.0" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Maximize Runner Disk Space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
+
+      - name: Install Build Dependencies
+        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole
+
+      - name: Checkout crDroid 16.0 Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: 16.0
+          submodules: recursive
+          depth: 1
+
+      - name: Download AOSP Clang Toolchain
+        run: |
+          mkdir -p $HOME/clang && cd $HOME/clang
+          wget -q https://googlesource.com -O clang.tar.gz
+          tar -xzf clang.tar.gz && rm clang.tar.gz
+
+      - name: Integrate KernelSU-Next
+        run: curl -LSs "https://githubusercontent.com" | bash -s next
+
+      - name: Integrate SUSFS (5.15)
+        run: |
+          git clone --depth=1 -b kernel-5.15 https://gitlab.com ../susfs4ksu || git clone --depth=1 -b gki-android13-5.15 https://gitlab.com ../susfs4ksu
+          cp -r ../susfs4ksu/kernel_patches/fs/* fs/
+          cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.15.patch || true
+          if [ -d KernelSU-Next ]; then
+            patch -d KernelSU-Next -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          elif [ -d drivers/kernelsu ]; then
+            patch -d drivers/kernelsu -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          fi
+
+      - name: Integrate Kali NetHunter Patches (5.15)
+        run: |
+          git clone --depth=1 https://gitlab.com ../nh-kernel
+          for p in ../nh-kernel/patches/5.15/*.patch; do patch -p1 --fuzz=3 < "$p" || true; done
+
+      - name: Configure Kernel Defconfig
+        run: |
+          export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
+          if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
+            ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
+          else
+            make O=out ARCH=arm64 gki_defconfig
+          fi
+          ./scripts/config --file out/.config -e KSU -e KPROBES -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT -e ATH9K_HTC -e ATH10K -e RT2800USB -e RTL8187 -e RTL88XXAU -e MT7601U -e MT76x2U -e BT_HCIBTUSB -e BT_HCIUART -e USB_SERIAL -e USB_SERIAL_CH341 -e USB_SERIAL_CP210X -e USB_SERIAL_FTDI_SIO -e USB_ACM -e USB_USBNET -e USB_NET_AX8817X -e USB_NET_AX88179_178A -e USB_RTL8152
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: Compile Kernel Image
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- Image
+
+      - name: Package into AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com AnyKernel3
+          cp out/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=auto;|g' anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=1;/g' anykernel.sh
+          rm -rf .git
+          zip -r9 ../OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip *
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP11-crDroid12-KSUNext-SUSFS-NetHunter
+          path: OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
