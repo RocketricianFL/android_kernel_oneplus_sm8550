@@ -79,7 +79,7 @@ jobs:
                           if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ')):
                               parts = stripped.split()
                               if len(parts) >= 2:
-                                  target = parts[1].strip('"'')
+                                  target = parts[1].strip(chr(34) + chr(39))
                                   rel_target = os.path.join(root, target) if stripped.startswith('rsource ') else target
                                   if not os.path.exists(rel_target):
                                       new_lines.append('# ' + line)
