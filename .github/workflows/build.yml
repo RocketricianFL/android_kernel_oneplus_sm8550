@@ -63,6 +63,7 @@ jobs:
         run: |
           python3 - << 'PYEOF'
           import os
+          qchars = chr(34) + chr(39)
           for root, _, files in os.walk('.'):
               if '/.git' in root or root.startswith('./out'):
                   continue
@@ -79,7 +80,7 @@ jobs:
                           if indent == 0 and (stripped.startswith('source ') or stripped.startswith('rsource ')):
                               parts = stripped.split()
                               if len(parts) >= 2:
-                                  target = parts[1].strip(chr(34) + chr(39))
+                                  target = parts[1].strip(qchars)
                                   rel_target = os.path.join(root, target) if stripped.startswith('rsource ') else target
                                   if not os.path.exists(rel_target):
                                       new_lines.append('# ' + line)
@@ -95,10 +96,17 @@ jobs:
         run: |
           export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
           mkdir -p out
-          if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
-            ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
+          DEFCONFIG_BASE=""
+          for cfg in arch/arm64/configs/vendor/kalama_GKI.config arch/arm64/configs/kalama_defconfig arch/arm64/configs/vendor/kalama_defconfig; do
+            if [ -f "$cfg" ]; then
+              DEFCONFIG_BASE="$cfg"
+              break
+            fi
+          done
+          if [ -n "$DEFCONFIG_BASE" ]; then
+            ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig "$DEFCONFIG_BASE"
           else
-            make O=out ARCH=arm64 gki_defconfig
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
           fi
           ./scripts/config --file out/.config \
             -e 64BIT -e ARM64 \
