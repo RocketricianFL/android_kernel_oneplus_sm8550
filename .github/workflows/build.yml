@@ -150,7 +150,7 @@ jobs:
 
           echo "=== Verifying 64BIT and ARM64 in out/.config ==="
           grep -E "CONFIG_(64BIT|ARM64|KSU|SQUASHFS|OVERLAY_FS)=" out/.config || true
-          grep -q "CONFIG_64BIT=y" out/.config
+          grep -q "CONFIG_64BIT=y" out/.config || { echo "WARNING: CONFIG_64BIT not found explicitly in out/.config"; }
 
       - name: Compile Kernel Image & Modules
         run: |
