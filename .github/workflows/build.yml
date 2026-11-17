@@ -37,9 +37,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-op11-v33-${{ github.sha }}
+          key: ccache-op11-v34-${{ github.sha }}
           restore-keys: |
-            ccache-op11-v33-
+            ccache-op11-v34-
 
       - name: Configure ccache Limits
         run: |
@@ -141,9 +141,16 @@ jobs:
         run: |
           export PATH="/usr/lib/ccache:$HOME/clang/bin:$PATH"
           export CCACHE_COMPILERCHECK=content
-          yes "" | make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+          set +e
+          make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++" \
-            KCFLAGS="-DCONFIG_64BIT=1" CROSS_COMPILE=aarch64-linux-gnu- Image
+            KCFLAGS="-DCONFIG_64BIT=1" CROSS_COMPILE=aarch64-linux-gnu- Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "=== COMPILER ERRORS DETECTED ==="
+            grep -n -C 5 -E "error:|fatal error:|undefined reference" build.log | tail -n 80
+            exit $BUILD_STATUS
+          fi
           ccache -s
 
       - name: Package into AnyKernel3
