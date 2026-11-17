@@ -37,9 +37,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-op11-v34-${{ github.sha }}
+          key: ccache-op11-v35-${{ github.sha }}
           restore-keys: |
-            ccache-op11-v34-
+            ccache-op11-v35-
 
       - name: Configure ccache Limits
         run: |
@@ -119,7 +119,7 @@ jobs:
               FRAGMENTS="$FRAGMENTS $cfg"
             fi
           done
-          ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O out $FRAGMENTS
+          ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" ./scripts/kconfig/merge_config.sh -m -O out $FRAGMENTS
           ./scripts/config --file out/.config \
             -e 64BIT -e ARM64 -e MMU -e COMPACTION \
             -e KSU -e KPROBES \
@@ -135,21 +135,23 @@ jobs:
             -e BT_HCIBTUSB -e BT_HCIUART \
             -e USB_SERIAL -e USB_SERIAL_CH341 -e USB_SERIAL_CP210X -e USB_SERIAL_FTDI_SIO -e USB_ACM \
             -e USB_USBNET -e USB_NET_AX8817X -e USB_NET_AX88179_178A -e USB_RTL8152
-          yes "" | make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          yes "" | make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
       - name: Compile Kernel Image Only
         run: |
           export PATH="/usr/lib/ccache:$HOME/clang/bin:$PATH"
           export CCACHE_COMPILERCHECK=content
           set +e
-          make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+          yes "" | make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++" \
-            KCFLAGS="-DCONFIG_64BIT=1" CROSS_COMPILE=aarch64-linux-gnu- Image 2>&1 | tee build.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          if [ $BUILD_STATUS -ne 0 ]; then
+            CROSS_COMPILE=aarch64-linux-gnu- Image > build.log 2>&1
+          EXIT_CODE=$?
+          set -e
+          tail -n 60 build.log
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "=== COMPILER ERRORS DETECTED ==="
-            grep -n -C 5 -E "error:|fatal error:|undefined reference" build.log | tail -n 80
-            exit $BUILD_STATUS
+            grep -n -C 5 -E "error:|fatal error:|undefined reference" build.log | tail -n 80 || true
+            exit $EXIT_CODE
           fi
           ccache -s
 
