@@ -1,11 +1,9 @@
 name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
 
-permissions:
-  contents: write
-
 on:
   push:
     branches: [ "16.0" ]
+    tags: [ "v*" ]
   workflow_dispatch:
 
 jobs:
@@ -16,7 +14,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
 
       - name: Install Build Dependencies
-        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole openjdk-17-jdk
+        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole openjdk-17-jdk gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Checkout crDroid 16.0 Kernel Source
         uses: actions/checkout@v4
@@ -35,21 +33,28 @@ jobs:
       - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-op11-crdroid16-${{ github.sha }}
+          restore-keys: |
+            ccache-op11-crdroid16-
+
+      - name: Configure ccache Environment
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache -M 5G
+          ccache -z
+          ccache -s
+
       - name: Integrate KernelSU-Next
         run: |
-          KSU_URL=$(echo "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL0tlcm5lbFNVLU5leHQvS2VybmVsU1UtTmV4dC9uZXh0L2tlcm5lbC9zZXR1cC5zaA==" | base64 -d)
-          curl -LSs "$KSU_URL" | bash -s next
-          if [ -d KernelSU-Next ]; then
-            cd KernelSU-Next
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "next")
-            git checkout "$LATEST_TAG" || true
-            cd ..
-          fi
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
       - name: Integrate SUSFS (5.15)
         run: |
-          SUSFS_URL=$(echo "aHR0cHM6Ly9naXRsYWIuY29tL3NpbW9ucHVuay9zdXNmczRrc3UuZ2l0" | base64 -d)
-          git clone --depth=1 -b gki-android13-5.15 "$SUSFS_URL" ../susfs4ksu || git clone --depth=1 -b kernel-5.15 "$SUSFS_URL" ../susfs4ksu
+          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu ||           git clone --depth=1 -b kernel-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_*.patch" | head -n 1)
@@ -57,20 +62,19 @@ jobs:
             echo "Applying $SUSFS_PATCH..."
             patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
           fi
-          KSU_SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/KernelSU -name "10_enable_susfs_*.patch" | head -n 1)
-          if [ -n "$KSU_SUSFS_PATCH" ]; then
+          KSU_PATCH=$(find ../susfs4ksu/kernel_patches/KernelSU -maxdepth 1 -name "10_enable_susfs_*.patch" | head -n 1)
+          if [ -n "$KSU_PATCH" ]; then
             if [ -d KernelSU-Next ]; then
-              patch -d KernelSU-Next -p1 --fuzz=3 < "$KSU_SUSFS_PATCH" || true
+              patch -d KernelSU-Next -p1 --fuzz=3 < "$KSU_PATCH" || true
             elif [ -d drivers/kernelsu ]; then
-              patch -d drivers/kernelsu -p1 --fuzz=3 < "$KSU_SUSFS_PATCH" || true
+              patch -d drivers/kernelsu -p1 --fuzz=3 < "$KSU_PATCH" || true
             fi
           fi
 
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
-          NH_URL=$(echo "aHR0cHM6Ly9naXRsYWIuY29tL2thbGlsaW51eC9uZXRodW50ZXIvYnVpbGQtc2NyaXB0cy9rYWxpLW5ldGh1bnRlci1rZXJuZWwuZ2l0" | base64 -d)
-          git clone --depth=1 "$NH_URL" ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'patch -p1 --fuzz=3 < "$1" || true' _ {} \;
+          git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
+          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'echo "Applying $1..."; patch -p1 --fuzz=3 < "$1" || true' _ {} \;
 
       - name: Stub Out External Oplus Kconfig References
         run: |
@@ -93,7 +97,7 @@ jobs:
                       if indent == 0 and (stripped.startswith("source ") or stripped.startswith("rsource ")):
                           parts = stripped.split()
                           if len(parts) >= 2:
-                              inc = parts[1].strip(chr(34) + chr(39))
+                              inc = parts[1].strip('"').strip("'")
                               rel = os.path.join(root, inc) if stripped.startswith("rsource ") else inc
                               if not os.path.exists(inc) and not os.path.exists(rel):
                                   out_lines.append("# " + line)
@@ -107,73 +111,110 @@ jobs:
 
       - name: Configure Kernel Defconfig
         run: |
-          mkdir -p out
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
-
-          echo "=== Available arm64 defconfigs ==="
+          mkdir -p out
+          echo "Available configs:"
           find arch/arm64/configs -maxdepth 2 -type f
 
-          if [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
+          if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+            ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/kalama_GKI.config
+          elif [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
             make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/kalama_defconfig
           elif [ -f arch/arm64/configs/kalama_defconfig ]; then
             make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kalama_defconfig
-          elif [ -f arch/arm64/configs/gki_defconfig ]; then
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
-            if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
-              ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/kalama_GKI.config
-            fi
           else
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 defconfig
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
           fi
 
-          ./scripts/config --file out/.config -e 64BIT -e ARM64
-
-          ./scripts/config --file out/.config \
-            -e KSU -e KPROBES \
-            -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG \
-            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS \
-            -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID \
-            -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT \
-            -e MODULES -e MODULE_UNLOAD \
-            -m ATH9K_HTC -m ATH10K -m RT2800USB -m RTL8187 -m MT7601U -m MT76x2U \
-            -m BT_HCIBTUSB -e BT_HCIUART \
-            -m USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO \
-            -e USB_ACM -e USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
+          cat << 'EOF' >> out/.config
+          CONFIG_64BIT=y
+          CONFIG_ARM64=y
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_SQUASHFS=y
+          CONFIG_SQUASHFS_FILE_CACHE=y
+          CONFIG_SQUASHFS_DECOMP_MULTI_PERCPU=y
+          CONFIG_SQUASHFS_XATTR=y
+          CONFIG_SQUASHFS_ZLIB=y
+          CONFIG_SQUASHFS_LZ4=y
+          CONFIG_SQUASHFS_LZO=y
+          CONFIG_SQUASHFS_XZ=y
+          CONFIG_SQUASHFS_ZSTD=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_BLK_DEV_LOOP=y
+          CONFIG_EXFAT_FS=y
+          CONFIG_USB_GADGET=y
+          CONFIG_USB_CONFIGFS=y
+          CONFIG_USB_CONFIGFS_F_HID=y
+          CONFIG_USB_CONFIGFS_F_MASS_STORAGE=y
+          CONFIG_USB_G_HID=y
+          CONFIG_CFG80211=y
+          CONFIG_MAC80211=y
+          CONFIG_MAC80211_MESH=y
+          CONFIG_CFG80211_WEXT=y
+          CONFIG_ATH9K_HTC=m
+          CONFIG_ATH10K=m
+          CONFIG_RT2800USB=m
+          CONFIG_RTL8187=m
+          CONFIG_RTL88XXAU=m
+          CONFIG_MT7601U=m
+          CONFIG_MT76x2U=m
+          CONFIG_BT_HCIBTUSB=m
+          CONFIG_BT_HCIUART=m
+          CONFIG_USB_SERIAL=m
+          CONFIG_USB_SERIAL_CH341=m
+          CONFIG_USB_SERIAL_CP210X=m
+          CONFIG_USB_SERIAL_FTDI_SIO=m
+          CONFIG_USB_ACM=m
+          CONFIG_USB_USBNET=m
+          CONFIG_USB_NET_AX8817X=m
+          CONFIG_USB_NET_AX88179_178A=m
+          CONFIG_USB_RTL8152=m
+          EOF
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          grep -E "CONFIG_64BIT|CONFIG_ARM64|CONFIG_KSU|CONFIG_SQUASHFS|CONFIG_OVERLAY_FS" out/.config || true
 
-          echo "=== Verifying 64BIT and ARM64 in out/.config ==="
-          grep -E "CONFIG_(64BIT|ARM64|KSU|SQUASHFS|OVERLAY_FS)=" out/.config || true
-          grep -q "CONFIG_64BIT=y" out/.config || { echo "WARNING: CONFIG_64BIT not found explicitly in out/.config"; }
-
-      - name: Compile Kernel Image & Modules
+      - name: Compile Kernel Image & Modules (with ccache)
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          MAKE_FLAGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-          if ! make -j$(nproc --all) $MAKE_FLAGS Image modules; then
-            echo "=== Parallel build failed; re-running with -j1 to surface exact error ==="
-            make -j1 $MAKE_FLAGS Image modules
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_COMPILERCHECK=content
+          export PATH="/usr/lib/ccache:$HOME/clang/bin:$PATH"
+          MAKE_ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC='ccache clang' HOSTCC='ccache gcc' HOSTCXX='ccache g++' LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          if ! eval make -j$(nproc --all) $MAKE_ARGS Image modules; then
+            echo "Parallel build failed; re-running single-threaded to capture exact error..."
+            eval make -j1 $MAKE_ARGS Image modules
           fi
+          ccache -s
 
       - name: Package modules.tar.gz
         run: |
+          export ARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
-          mkdir -p mod_out
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 INSTALL_MOD_PATH=$(pwd)/mod_out INSTALL_MOD_STRIP=1 modules_install
-          tar -czf modules.tar.gz -C mod_out .
+          mkdir -p modules_out
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 INSTALL_MOD_PATH=$(pwd)/modules_out INSTALL_MOD_STRIP=1 modules_install
+          tar -czvf modules.tar.gz -C modules_out .
 
       - name: Package into AnyKernel3
         run: |
-          AK3_URL=$(echo "aHR0cHM6Ly9naXRodWIuY29tL29zbTBzaXMvQW55S2VybmVsMy5naXQ=" | base64 -d)
-          git clone --depth=1 "$AK3_URL" AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cp out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
@@ -182,53 +223,55 @@ jobs:
           rm -rf .git
           zip -r9 ../OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip *
 
-      - name: Bundle Nethunter-Wireless-Firmware.zip
+      - name: Package NetHunter Wireless Firmware Module
         run: |
-          FW_URL=$(echo "aHR0cHM6Ly9naXRodWIuY29tL0F5dXNtYW5OYW5kYS9uZXRodW50ZXItd2lyZWxlc3MtZmlybXdhcmUtbWFnaXNrLW1vZHVsZS5naXQ=" | base64 -d)
-          git clone --depth=1 "$FW_URL" nh-fw
-          cd nh-fw && rm -rf .git
-          zip -r9 ../Nethunter-Wireless-Firmware.zip *
+          git clone --depth=1 https://github.com/AyusmanNanda/nethunter-wireless-firmware-magisk-module.git nh-fw || true
+          if [ -d nh-fw ]; then
+            cd nh-fw && rm -rf .git && zip -r9 ../Nethunter-Wireless-Firmware.zip * && cd ..
+          fi
 
-      - name: Setup Android SDK for Manager APK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Build KernelSU-Next Manager APK
         run: |
-          MGR_DIR=""
+          KSU_DIR=""
           if [ -d KernelSU-Next/manager ]; then
-            MGR_DIR="KernelSU-Next/manager"
+            KSU_DIR="KernelSU-Next/manager"
           elif [ -d drivers/kernelsu/manager ]; then
-            MGR_DIR="drivers/kernelsu/manager"
+            KSU_DIR="drivers/kernelsu/manager"
           fi
-          if [ -n "$MGR_DIR" ]; then
-            cd "$MGR_DIR"
+          if [ -n "$KSU_DIR" ]; then
+            cd "$KSU_DIR"
             chmod +x gradlew
             ./gradlew assembleRelease
             APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
-            "$APKSIGNER" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out ../../../ksun.apk "$APK_PATH"
+            cp "$APK_PATH" "$GITHUB_WORKSPACE/ksun.apk"
           fi
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OP11-crDroid12-Release-Bundle
+          name: OP11-crDroid12-Full-Release-Bundle
           path: |
             OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
-            ksun.apk
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
+            ksun.apk
           if-no-files-found: warn
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v5.15.211-${{ github.run_number }}
-          name: OP11 crDroid 12 (5.15.211) KSU-Next + SUSFS + NetHunter #${{ github.run_number }}
           files: |
             OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
-            ksun.apk
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
-          fail_on_unmatched_files: false
+            ksun.apk
+          body: |
+            ### Post-Install — Verify & Finish Setup
+            1. **Install Matching Manager:** Install `ksun.apk` from this release and confirm it reports **Working**.
+            2. **Install SUSFS Userspace Module:** Flash `sidex15/susfs4ksu-module` in KernelSU-Next Manager and reboot.
+            3. **Install Meta Module & Wireless Firmware:** Flash `NoMount` (or `Mountify`) alongside `Nethunter-Wireless-Firmware.zip` in KernelSU-Next Manager.
+            4. **Load Extra `.ko` Drivers:** Extract `modules.tar.gz` and load external adapter modules via `insmod` as needed.
