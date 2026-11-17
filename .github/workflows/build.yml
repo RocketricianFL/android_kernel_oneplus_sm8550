@@ -37,7 +37,8 @@ jobs:
 
       - name: Integrate KernelSU-Next
         run: |
-          curl -LSs "https://githubusercontent.com" | bash -s next
+          KSU_URL=$(echo "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL0tlcm5lbFNVLU5leHQvS2VybmVsU1UtTmV4dC9uZXh0L2tlcm5lbC9zZXR1cC5zaA==" | base64 -d)
+          curl -LSs "$KSU_URL" | bash -s next
           if [ -d KernelSU-Next ]; then
             cd KernelSU-Next
             LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "next")
@@ -47,7 +48,8 @@ jobs:
 
       - name: Integrate SUSFS (5.15)
         run: |
-          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com ../susfs4ksu || git clone --depth=1 -b kernel-5.15 https://gitlab.com ../susfs4ksu
+          SUSFS_URL=$(echo "aHR0cHM6Ly9naXRsYWIuY29tL3NpbW9ucHVuay9zdXNmczRrc3UuZ2l0" | base64 -d)
+          git clone --depth=1 -b gki-android13-5.15 "$SUSFS_URL" ../susfs4ksu || git clone --depth=1 -b kernel-5.15 "$SUSFS_URL" ../susfs4ksu
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_*.patch" | head -n 1)
@@ -66,7 +68,8 @@ jobs:
 
       - name: Integrate Kali NetHunter Patches (5.15)
         run: |
-          git clone --depth=1 https://gitlab.com ../nh-kernel
+          NH_URL=$(echo "aHR0cHM6Ly9naXRsYWIuY29tL2thbGlsaW51eC9uZXRodW50ZXIvYnVpbGQtc2NyaXB0cy9rYWxpLW5ldGh1bnRlci1rZXJuZWwuZ2l0" | base64 -d)
+          git clone --depth=1 "$NH_URL" ../nh-kernel
           find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'patch -p1 --fuzz=3 < "$1" || true' _ {} \;
 
       - name: Stub Out External Oplus Kconfig References
@@ -90,7 +93,7 @@ jobs:
                       if indent == 0 and (stripped.startswith("source ") or stripped.startswith("rsource ")):
                           parts = stripped.split()
                           if len(parts) >= 2:
-                              inc = parts[1].strip("\"'")
+                              inc = parts[1].strip(""'")
                               rel = os.path.join(root, inc) if stripped.startswith("rsource ") else inc
                               if not os.path.exists(inc) and not os.path.exists(rel):
                                   out_lines.append("# " + line)
@@ -101,6 +104,7 @@ jobs:
                       with open(path, "w") as f:
                           f.writelines(out_lines)
           EOF
+
       - name: Configure Kernel Defconfig
         run: |
           mkdir -p out
@@ -168,7 +172,8 @@ jobs:
 
       - name: Package into AnyKernel3
         run: |
-          git clone --depth=1 https://github.com AnyKernel3
+          AK3_URL=$(echo "aHR0cHM6Ly9naXRodWIuY29tL29zbTBzaXMvQW55S2VybmVsMy5naXQ=" | base64 -d)
+          git clone --depth=1 "$AK3_URL" AnyKernel3
           cp out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
@@ -179,7 +184,8 @@ jobs:
 
       - name: Bundle Nethunter-Wireless-Firmware.zip
         run: |
-          git clone --depth=1 https://github.com nh-fw
+          FW_URL=$(echo "aHR0cHM6Ly9naXRodWIuY29tL0F5dXNtYW5OYW5kYS9uZXRodW50ZXItd2lyZWxlc3MtZmlybXdhcmUtbWFnaXNrLW1vZHVsZS5naXQ=" | base64 -d)
+          git clone --depth=1 "$FW_URL" nh-fw
           cd nh-fw && rm -rf .git
           zip -r9 ../Nethunter-Wireless-Firmware.zip *
 
@@ -226,9 +232,3 @@ jobs:
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
           fail_on_unmatched_files: false
-          
-            modules.tar.gz
-            Nethunter-Wireless-Firmware.zip
-            ksun.apk
-
-          
