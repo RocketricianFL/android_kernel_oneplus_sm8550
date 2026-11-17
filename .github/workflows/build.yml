@@ -93,7 +93,7 @@ jobs:
                       if indent == 0 and (stripped.startswith("source ") or stripped.startswith("rsource ")):
                           parts = stripped.split()
                           if len(parts) >= 2:
-                              inc = parts[1].strip(""'")
+                              inc = parts[1].strip(chr(34) + chr(39))
                               rel = os.path.join(root, inc) if stripped.startswith("rsource ") else inc
                               if not os.path.exists(inc) and not os.path.exists(rel):
                                   out_lines.append("# " + line)
