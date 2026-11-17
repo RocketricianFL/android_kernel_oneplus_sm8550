@@ -14,10 +14,8 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Maximize Runner Disk Space
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-
-      - name: Setup 16GB Swap for LTO
         run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -33,14 +31,6 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup CCache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-op11-crdroid16-${{ github.sha }}
-          restore-keys: |
-            ccache-op11-crdroid16-
-
       - name: Download Proton Clang Toolchain
         uses: actions/checkout@v4
         with:
@@ -50,6 +40,14 @@ jobs:
 
       - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-op11-crdroid16-${{ github.sha }}
+          restore-keys: |
+            ccache-op11-crdroid16-
 
       - name: Integrate KernelSU-Next
         run: |
@@ -106,7 +104,7 @@ jobs:
                       if indent == 0 and (stripped.startswith("source ") or stripped.startswith("rsource ")):
                           parts = stripped.split()
                           if len(parts) >= 2:
-                              inc = parts[1].strip("\"'")
+                              inc = parts[1].strip(""'")
                               rel = os.path.join(root, inc) if stripped.startswith("rsource ") else inc
                               if not os.path.exists(inc) and not os.path.exists(rel):
                                   out_lines.append("# " + line)
@@ -138,25 +136,27 @@ jobs:
             make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 defconfig
           fi
 
-          # Ensure 64-bit ARM64 & speed up linking (ThinLTO instead of Full LTO, disable heavy DWARF/BTF debug info)
-          ./scripts/config --file out/.config             -e 64BIT -e ARM64             -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e LTO_CLANG             -d DEBUG_INFO -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_DWARF5 -d DEBUG_INFO_BTF
+          # Speed up build: use ThinLTO instead of Full LTO and strip heavy debug symbols
+          ./scripts/config --file out/.config             -e 64BIT -e ARM64             -d LTO_CLANG_FULL -e LTO_CLANG_THIN             -d DEBUG_INFO -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_DWARF5 -d DEBUG_INFO_BTF
 
           # Enable KernelSU-Next, SUSFS, SquashFS, OverlayFS, and NetHunter
           ./scripts/config --file out/.config             -e KSU -e KPROBES             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT             -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT             -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG             -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS             -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID             -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT             -e MODULES -e MODULE_UNLOAD             -m ATH9K_HTC -m ATH10K -m RT2800USB -m RTL8187 -m MT7601U -m MT76x2U             -m BT_HCIBTUSB -e BT_HCIUART             -m USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO             -e USB_ACM -e USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          grep -q "CONFIG_64BIT=y" out/.config
 
       - name: Compile Kernel Image & Modules
         run: |
           export PATH="$HOME/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
+          export CCACHE_DIR="$HOME/.ccache"
           ccache -M 5G
-          MAKE_FLAGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC='ccache clang' LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          MAKE_FLAGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
           set -o pipefail
-          if ! eval "make -j$(nproc --all) $MAKE_FLAGS Image modules" 2>&1 | tee build.log; then
-            echo "=== Build Failed — Last 60 Error Lines ==="
-            grep -iE "error:|fatal error:|undefined reference" build.log | tail -n 60 || tail -n 60 build.log
+          if ! eval make -j$(nproc --all) $MAKE_FLAGS Image modules 2>&1 | tee build.log; then
+            echo "=== Build failed; extracting compiler errors ==="
+            grep -iE "error:|fatal error:" build.log | tail -n 40 || tail -n 60 build.log
             exit 1
           fi
           ccache -s
