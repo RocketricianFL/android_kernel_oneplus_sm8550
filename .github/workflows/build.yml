@@ -7,6 +7,33 @@ on:
   push:
     branches: [ "16.0" ]
   workflow_dispatch:
+    inputs:
+      enable_susfs:
+        description: "Integrate SUSFS"
+        type: boolean
+        default: true
+      enable_nethunter:
+        description: "Apply NetHunter patches"
+        type: boolean
+        default: true
+      publish_release:
+        description: "Publish a GitHub Release"
+        type: boolean
+        default: true
+
+concurrency:
+  group: op11-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784e.tar.gz
+  ZIP_NAME: OP11-crDroid16-KSUNext-SUSFS-NetHunter
+  # push events have no inputs -> default to true
+  ENABLE_SUSFS: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_susfs }}
+  ENABLE_NETHUNTER: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_nethunter }}
+  PUBLISH_RELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
 
 jobs:
   build:
@@ -15,14 +42,24 @@ jobs:
     steps:
       - name: Maximize Runner Disk Space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          # Runner may already have an active /swapfile -> use a new path
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l 16G /mnt/kswap
+          sudo chmod 600 /mnt/kswap
+          sudo mkswap /mnt/kswap
+          sudo swapon /mnt/kswap
+          free -h && df -h
 
       - name: Install Build Dependencies
-        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 pahole openjdk-17-jdk
+        run: |
+          sudo apt-get update
+          # NOTE: on Ubuntu 22.04 pahole ships in the "dwarves" package
+          sudo apt-get install -y bc bison build-essential ccache curl flex git \
+            libssl-dev libelf-dev python3 python-is-python3 zip unzip wget zstd lz4 \
+            dwarves cpio rsync kmod
 
       - name: Checkout crDroid 16.0 Kernel Source
         uses: actions/checkout@v4
@@ -31,15 +68,12 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Download Proton Clang Toolchain
-        uses: actions/checkout@v4
-        with:
-          repository: kdrag0n/proton-clang
-          path: clang-toolchain
-          fetch-depth: 1
-
-      - name: Link Clang Toolchain
-        run: mv clang-toolchain $HOME/clang
+      - name: Download AOSP Clang (r450784e / clang 14.0.7, matches android13-5.15 GKI)
+        run: |
+          mkdir -p "$HOME/clang"
+          curl -fL --retry 3 "$CLANG_URL" | tar -xz -C "$HOME/clang"
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          "$HOME/clang/bin/clang" --version
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -52,61 +86,88 @@ jobs:
       - name: Integrate KernelSU-Next
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          if [ -d KernelSU-Next ]; then
-            cd KernelSU-Next
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "next")
-            git checkout "$LATEST_TAG" || true
-            cd ..
-          fi
+          test -d KernelSU-Next
+          test -e drivers/kernelsu
+          grep -q kernelsu drivers/Kconfig
+          grep -q kernelsu drivers/Makefile
 
-      - name: Integrate SUSFS (5.15)
+      - name: Integrate SUSFS (android13-5.15)
+        if: env.ENABLE_SUSFS == 'true'
         run: |
-          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu || git clone --depth=1 -b kernel-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          set -e
+          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+          ok=1
           SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs_*.patch" | head -n 1)
-          if [ -n "$SUSFS_PATCH" ]; then
-            echo "Applying $SUSFS_PATCH..."
-            patch -p1 --fuzz=3 < "$SUSFS_PATCH" || true
+          if [ -n "$SUSFS_PATCH" ] && patch -p1 --dry-run --fuzz=3 -s < "$SUSFS_PATCH" >/dev/null; then
+            patch -p1 --fuzz=3 --no-backup-if-mismatch < "$SUSFS_PATCH"
+          else
+            echo "::warning::SUSFS kernel patch does not apply cleanly to this tree"
+            ok=0
           fi
-          KSU_SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/KernelSU -name "10_enable_susfs_*.patch" | head -n 1)
-          if [ -n "$KSU_SUSFS_PATCH" ]; then
-            if [ -d KernelSU-Next ]; then
-              patch -d KernelSU-Next -p1 --fuzz=3 < "$KSU_SUSFS_PATCH" || true
-            elif [ -d drivers/kernelsu ]; then
-              patch -d drivers/kernelsu -p1 --fuzz=3 < "$KSU_SUSFS_PATCH" || true
-            fi
+
+          KSU_PATCH=$(find ../susfs4ksu/kernel_patches/KernelSU -name "10_enable_susfs_*.patch" | head -n 1)
+          if [ "$ok" = 1 ] && [ -n "$KSU_PATCH" ] && patch -d KernelSU-Next -p1 --dry-run --fuzz=3 -s < "$KSU_PATCH" >/dev/null; then
+            patch -d KernelSU-Next -p1 --fuzz=3 --no-backup-if-mismatch < "$KSU_PATCH"
+          else
+            echo "::warning::SUSFS KernelSU patch does not apply to KernelSU-Next (it targets upstream KernelSU)"
+            ok=0
+          fi
+
+          if [ "$ok" = 1 ]; then
+            echo "SUSFS_OK=1" >> "$GITHUB_ENV"
+          else
+            # Revert anything partially applied so the tree still compiles
+            echo "::warning::SUSFS disabled for this build; kernel will be built with KernelSU-Next only"
+            git checkout -- fs include || true
+            git clean -fdq fs include || true
+            echo "SUSFS_OK=0" >> "$GITHUB_ENV"
           fi
 
       - name: Integrate Kali NetHunter Patches (5.15)
+        if: env.ENABLE_NETHUNTER == 'true'
         run: |
-          git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel
-          find ../nh-kernel -path "*5.15*" -name "*.patch" -exec sh -c 'patch -p1 --fuzz=3 < "$1" || true' _ {} \;
+          git clone --depth=1 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel.git ../nh-kernel || {
+            echo "::warning::NetHunter patch repo unavailable, skipping"; exit 0; }
+          applied=0; skipped=0
+          while IFS= read -r p; do
+            if patch -p1 -N --dry-run -s < "$p" >/dev/null 2>&1; then
+              patch -p1 -N --no-backup-if-mismatch -s < "$p" && applied=$((applied+1))
+              echo "applied: $p"
+            else
+              skipped=$((skipped+1))
+              echo "skipped: $p"
+            fi
+          done < <(find ../nh-kernel -path "*5.15*" -name "*.patch" | sort)
+          echo "NetHunter patches applied=$applied skipped=$skipped"
+          if find . -name "*.rej" -not -path "./.git/*" | grep -q .; then
+            echo "::error::Rejected hunks found"; find . -name "*.rej"; exit 1
+          fi
 
-      - name: Stub Out External Oplus Kconfig References
+      - name: Stub Out Missing Oplus Kconfig References
         run: |
           python3 - << 'EOF'
           import os
-          for root, _, files in os.walk("."):
-              if ".git" in root or root.startswith("./out"):
-                  continue
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in (".git", "out")]
               for fn in files:
                   if not fn.startswith("Kconfig"):
                       continue
                   path = os.path.join(root, fn)
                   with open(path, "r", errors="ignore") as f:
                       lines = f.readlines()
-                  changed = False
-                  out_lines = []
+                  changed, out_lines = False, []
                   for line in lines:
-                      indent = len(line) - len(line.lstrip())
                       stripped = line.lstrip()
-                      if indent == 0 and (stripped.startswith("source ") or stripped.startswith("rsource ")):
+                      if stripped.startswith(("source ", "rsource ")):
                           parts = stripped.split()
                           if len(parts) >= 2:
-                              inc = parts[1].strip(""'")
-                              rel = os.path.join(root, inc) if stripped.startswith("rsource ") else inc
-                              if not os.path.exists(inc) and not os.path.exists(rel):
+                              inc = parts[1].strip("\"'")
+                              rel = os.path.join(root, inc)
+                              if "$" not in inc and not os.path.exists(inc) and not os.path.exists(rel):
+                                  print(f"stubbed: {path}: {inc}")
                                   out_lines.append("# " + line)
                                   changed = True
                                   continue
@@ -118,54 +179,91 @@ jobs:
 
       - name: Configure Kernel Defconfig
         run: |
+          set -e
+          M=(make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang)
           mkdir -p out
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export PATH="$HOME/clang/bin:$PATH"
 
           if [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/kalama_defconfig
+            "${M[@]}" vendor/kalama_defconfig
           elif [ -f arch/arm64/configs/kalama_defconfig ]; then
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kalama_defconfig
+            "${M[@]}" kalama_defconfig
           elif [ -f arch/arm64/configs/gki_defconfig ]; then
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
-            if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
-              ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/kalama_GKI.config
+            "${M[@]}" gki_defconfig
+            FRAGS=$(ls arch/arm64/configs/vendor/kalama_GKI.config arch/arm64/configs/vendor/oplus_GKI.config 2>/dev/null || true)
+            if [ -n "$FRAGS" ]; then
+              ARCH=arm64 LLVM=1 CC=clang ./scripts/kconfig/merge_config.sh -m -O out out/.config $FRAGS
             fi
           else
-            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 defconfig
+            echo "::error::No usable defconfig found"; exit 1
           fi
 
-          # Speed up build: use ThinLTO instead of Full LTO and strip heavy debug symbols
-          ./scripts/config --file out/.config             -e 64BIT -e ARM64             -d LTO_CLANG_FULL -e LTO_CLANG_THIN             -d DEBUG_INFO -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_DWARF5 -d DEBUG_INFO_BTF
+          # Faster CI build: ThinLTO, no heavy debug info
+          ./scripts/config --file out/.config \
+            -d LTO_CLANG_FULL -e LTO_CLANG_THIN \
+            -d DEBUG_INFO -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_DWARF5 -d DEBUG_INFO_BTF
 
-          # Enable KernelSU-Next, SUSFS, SquashFS, OverlayFS, and NetHunter
-          ./scripts/config --file out/.config             -e KSU -e KPROBES             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT             -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT             -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG             -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS             -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID             -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT             -e MODULES -e MODULE_UNLOAD             -m ATH9K_HTC -m ATH10K -m RT2800USB -m RTL8187 -m MT7601U -m MT76x2U             -m BT_HCIBTUSB -e BT_HCIUART             -m USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO             -e USB_ACM -e USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
+          # KernelSU-Next
+          ./scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
 
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          # SUSFS (only if patches applied)
+          if [ "${SUSFS_OK:-0}" = 1 ]; then
+            ./scripts/config --file out/.config \
+              -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+              -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+              -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
+              -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG \
+              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          fi
+
+          # Filesystems + NetHunter USB/wireless
+          ./scripts/config --file out/.config \
+            -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS \
+            -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_MASS_STORAGE \
+            -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT \
+            -e MODULES -e MODULE_UNLOAD \
+            -e WLAN -e WLAN_VENDOR_ATH -e WLAN_VENDOR_RALINK -e WLAN_VENDOR_REALTEK -e WLAN_VENDOR_MEDIATEK \
+            -m ATH9K_HTC -m RT2X00 -m RT2800USB -m RTL8187 -m MT7601U -m MT76x2U \
+            -e BT -m BT_HCIBTUSB -e BT_HCIUART \
+            -e USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO \
+            -e USB_ACM -e USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
+
+          "${M[@]}" olddefconfig
           grep -q "CONFIG_64BIT=y" out/.config
+          grep -q "CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU did not stick"; exit 1; }
+          cp out/.config kernel.config
 
       - name: Compile Kernel Image & Modules
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
           export CCACHE_DIR="$HOME/.ccache"
           ccache -M 5G
-          MAKE_FLAGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          M=(make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1
+             CC="ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm
+             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip)
           set -o pipefail
-          if ! eval make -j$(nproc --all) $MAKE_FLAGS Image modules 2>&1 | tee build.log; then
-            echo "=== Build failed; extracting compiler errors ==="
-            grep -iE "error:|fatal error:" build.log | tail -n 40 || tail -n 60 build.log
+          if ! "${M[@]}" Image modules 2>&1 | tee build.log; then
+            echo "=== Build failed; compiler errors ==="
+            grep -iE "error:|fatal error:|undefined reference" build.log | tail -n 60 || tail -n 80 build.log
             exit 1
           fi
           ccache -s
+          test -f out/arch/arm64/boot/Image
+          echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            kernel.config
+          if-no-files-found: ignore
 
       - name: Package modules.tar.gz
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
           mkdir -p mod_out
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 INSTALL_MOD_PATH=$(pwd)/mod_out INSTALL_MOD_STRIP=1 modules_install
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
+            INSTALL_MOD_PATH="$(pwd)/mod_out" INSTALL_MOD_STRIP=1 DEPMOD=true modules_install
           tar -czf modules.tar.gz -C mod_out .
 
       - name: Package into AnyKernel3
@@ -173,57 +271,76 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cp out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=auto;|g' anykernel.sh
-          sed -i 's/is_slot_device=0;/is_slot_device=1;/g' anykernel.sh
-          rm -rf .git
-          zip -r9 ../OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip *
+          rm -rf .git .github README.md modules patch ramdisk
+          # Write a GKI-style anykernel.sh (OP11 is A/B, kernel lives in boot)
+          cat > anykernel.sh << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=OP11 crDroid 16 KSU-Next + SUSFS + NetHunter
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=OP5913L1
+          device.name2=salami
+          device.name3=CPH2449
+          device.name4=CPH2447
+          device.name5=PHB110
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+          sed -i 's/^          //' anykernel.sh
+          zip -r9 "../${ZIP_NAME}.zip" * -x .gitignore
 
       - name: Bundle Nethunter-Wireless-Firmware.zip
+        continue-on-error: true
         run: |
           git clone --depth=1 https://github.com/AyusmanNanda/nethunter-wireless-firmware-magisk-module.git nh-fw
           cd nh-fw && rm -rf .git
           zip -r9 ../Nethunter-Wireless-Firmware.zip *
 
-      - name: Setup Android SDK for Manager APK
-        uses: android-actions/setup-android@v3
-
-      - name: Build KernelSU-Next Manager APK
+      - name: Fetch KernelSU-Next Manager APK (prebuilt release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          MGR_DIR=""
-          if [ -d KernelSU-Next/manager ]; then
-            MGR_DIR="KernelSU-Next/manager"
-          elif [ -d drivers/kernelsu/manager ]; then
-            MGR_DIR="drivers/kernelsu/manager"
-          fi
-          if [ -n "$MGR_DIR" ]; then
-            cd "$MGR_DIR"
-            chmod +x gradlew
-            ./gradlew assembleRelease
-            APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
-            "$APKSIGNER" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out ../../../ksun.apk "$APK_PATH"
-          fi
+          gh release download --repo KernelSU-Next/KernelSU-Next --pattern "*.apk" --dir mgr --clobber
+          APK=$(ls mgr/*.apk | grep -vi spoof | head -n 1)
+          cp "$APK" ksun.apk
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OP11-crDroid12-Release-Bundle
+          name: ${{ env.ZIP_NAME }}-${{ env.KVER }}-${{ github.run_number }}
           path: |
-            OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+            ${{ env.ZIP_NAME }}.zip
             ksun.apk
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
+            kernel.config
           if-no-files-found: warn
 
       - name: Publish GitHub Release
+        if: env.PUBLISH_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v5.15.211-${{ github.run_number }}
-          name: OP11 crDroid 12 (5.15.211) KSU-Next + SUSFS + NetHunter #${{ github.run_number }}
+          tag_name: v${{ env.KVER }}-${{ github.run_number }}
+          name: OP11 crDroid 16 (${{ env.KVER }}) KSU-Next${{ env.SUSFS_OK == '1' && ' + SUSFS' || '' }} + NetHunter #${{ github.run_number }}
           files: |
-            OP11-crDroid12-KSUNext-SUSFS-NetHunter.zip
+            ${{ env.ZIP_NAME }}.zip
             ksun.apk
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
