@@ -1,4 +1,4 @@
-name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter + ccache)
+name: Build OP11 crDroid 16.0 Kernel (KSU-Next + SUSFS + NetHunter)
 
 on:
   push:
@@ -32,19 +32,13 @@ jobs:
       - name: Link Clang Toolchain
         run: mv clang-toolchain $HOME/clang
 
-      - name: Setup ccache
+      - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-op11-v29-${{ github.sha }}
+          key: ccache-op11-v31-${{ github.sha }}
           restore-keys: |
-            ccache-op11-v29-
-
-      - name: Configure ccache
-        run: |
-          export PATH="/usr/lib/ccache:$HOME/clang/bin:$PATH"
-          ccache -M 5G
-          ccache -z
+            ccache-op11-v31-
 
       - name: Integrate KernelSU-Next
         run: |
@@ -110,19 +104,25 @@ jobs:
         run: |
           export ARCH=arm64 SUBARCH=arm64 PATH="$HOME/clang/bin:$PATH"
           mkdir -p out
-          if [ -f arch/arm64/configs/vendor/kalama_GKI.config ]; then
-            ./scripts/kconfig/merge_config.sh -m -O out arch/arm64/configs/gki_defconfig arch/arm64/configs/vendor/kalama_GKI.config
-          else
-            make O=out ARCH=arm64 gki_defconfig
-          fi
+          CONFIGS="arch/arm64/configs/gki_defconfig"
+          for frag in             arch/arm64/configs/vendor/kalama_GKI.config             arch/arm64/configs/vendor/oplus/kalama_GKI.config             arch/arm64/configs/vendor/debugfs.config; do
+            if [ -f "$frag" ]; then
+              CONFIGS="$CONFIGS $frag"
+            fi
+          done
+          echo "Merging configs: $CONFIGS"
+          ARCH=arm64 ./scripts/kconfig/merge_config.sh -m -O out $CONFIGS
           ./scripts/config --file out/.config             -e 64BIT -e ARM64 -e MMU -e COMPACTION             -e KSU -e KPROBES             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT             -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT             -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS             -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG             -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS             -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_F_MASS_STORAGE -e USB_G_HID             -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT             -m ATH9K_HTC -m ATH10K -m RT2800USB -m RTL8187 -m RTL88XXAU -m MT7601U -m MT76x2U             -m BT_HCIBTUSB -e BT_HCIUART             -m USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO -m USB_ACM             -m USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-          grep -q "CONFIG_64BIT=y" out/.config
+          grep -E "CONFIG_(64BIT|ARM64|MMU|KSU)=" out/.config || true
 
       - name: Compile Kernel Image & Modules (with ccache)
         run: |
           export PATH="$HOME/clang/bin:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
           export CCACHE_COMPILERCHECK=content
+          ccache -M 5G
+          ccache -z
           make -j$(nproc --all) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++" CROSS_COMPILE=aarch64-linux-gnu- Image modules ||           make -j1 O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++" CROSS_COMPILE=aarch64-linux-gnu- Image modules
           ccache -s
           mkdir -p out/modules_stage
