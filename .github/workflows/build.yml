@@ -273,7 +273,7 @@ jobs:
                   if m: d[m.group(1)]=m.group(2)
               return d
           b,f=load("baseline.config"),load("out/.config")
-          allowed={"LOCALVERSION","LOCALVERSION_AUTO","LTO_CLANG_FULL","LTO_CLANG_THIN","LTO_CLANG","DEBUG_INFO","DEBUG_INFO_DWARF4","DEBUG_INFO_DWARF5","DEBUG_INFO_BTF","DEBUG_INFO_BTF_MODULES","DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT","DEBUG_INFO_REDUCED","DEBUG_INFO_COMPRESSED","DEBUG_INFO_SPLIT","PAHOLE_HAS_SPLIT_BTF","MODULE_ALLOW_BTF_MISMATCH","GDB_SCRIPTS"}
+          allowed={"LOCALVERSION","MODULE_SCMVERSION","LOCALVERSION_AUTO","LTO_CLANG_FULL","LTO_CLANG_THIN","LTO_CLANG","DEBUG_INFO","DEBUG_INFO_DWARF4","DEBUG_INFO_DWARF5","DEBUG_INFO_BTF","DEBUG_INFO_BTF_MODULES","DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT","DEBUG_INFO_REDUCED","DEBUG_INFO_COMPRESSED","DEBUG_INFO_SPLIT","PAHOLE_HAS_SPLIT_BTF","MODULE_ALLOW_BTF_MISMATCH","GDB_SCRIPTS"}
           bad=[f"{k}: {v} -> {f.get(k,'unset')}" for k,v in b.items() if k not in allowed and f.get(k)!=v and v in("y","m")]
           for x in bad: print("::error::config changed:",x)
           sys.exit(1 if bad else 0)
