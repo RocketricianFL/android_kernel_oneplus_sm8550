@@ -28,7 +28,6 @@ concurrency:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784e.tar.gz
   ZIP_NAME: OP11-crDroid16-KSUNext-SUSFS-NetHunter
   # push events have no inputs -> default to true
   ENABLE_SUSFS: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_susfs }}
@@ -68,12 +67,20 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Download AOSP Clang (r450784e / clang 14.0.7, matches android13-5.15 GKI)
+      # Proton Clang (64-bit clang + bundled aarch64 binutils) -- same toolchain as the working v32 build.
+      - name: Download Proton Clang Toolchain
+        uses: actions/checkout@v4
+        with:
+          repository: kdrag0n/proton-clang
+          path: clang-toolchain
+          fetch-depth: 1
+
+      - name: Link Clang Toolchain
         run: |
-          mkdir -p "$HOME/clang"
-          curl -fL --retry 3 "$CLANG_URL" | tar -xz -C "$HOME/clang"
+          mv clang-toolchain "$HOME/clang"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
-          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/clang" --version | head -1
+          ls "$HOME/clang/bin" | grep -E "aarch64-linux-gnu-(as|ld)$"
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -180,22 +187,18 @@ jobs:
       - name: Configure Kernel Defconfig
         run: |
           set -e
-          M=(make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang)
+          M=(make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu-)
           mkdir -p out
 
-          if [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
-            "${M[@]}" vendor/kalama_defconfig
-          elif [ -f arch/arm64/configs/kalama_defconfig ]; then
-            "${M[@]}" kalama_defconfig
-          elif [ -f arch/arm64/configs/gki_defconfig ]; then
-            "${M[@]}" gki_defconfig
-            FRAGS=$(ls arch/arm64/configs/vendor/kalama_GKI.config arch/arm64/configs/vendor/oplus_GKI.config 2>/dev/null || true)
-            if [ -n "$FRAGS" ]; then
-              ARCH=arm64 LLVM=1 CC=clang ./scripts/kconfig/merge_config.sh -m -O out out/.config $FRAGS
-            fi
-          else
-            echo "::error::No usable defconfig found"; exit 1
-          fi
+          # Same base config as the working v32 build: gki_defconfig + vendor fragments
+          FRAGS="arch/arm64/configs/gki_defconfig"
+          for f in arch/arm64/configs/vendor/kalama_GKI.config \
+                   arch/arm64/configs/vendor/oplus/kalama_GKI.config \
+                   arch/arm64/configs/vendor/debugfs.config; do
+            if [ -f "$f" ]; then FRAGS="$FRAGS $f"; fi
+          done
+          echo "Config fragments: $FRAGS"
+          ARCH=arm64 LLVM=1 CC=clang ./scripts/kconfig/merge_config.sh -m -O out $FRAGS
 
           # Faster CI build: ThinLTO, no heavy debug info
           ./scripts/config --file out/.config \
@@ -236,9 +239,12 @@ jobs:
         run: |
           export CCACHE_DIR="$HOME/.ccache"
           ccache -M 5G
+          export CCACHE_COMPILERCHECK=content
+          ccache -z
+          # Same flags as the working v32 build
           M=(make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1
-             CC="ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm
-             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip)
+             CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++"
+             CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-DCONFIG_64BIT=1")
           set -o pipefail
           if ! "${M[@]}" Image modules 2>&1 | tee build.log; then
             echo "=== Build failed; compiler errors ==="
@@ -262,7 +268,7 @@ jobs:
       - name: Package modules.tar.gz
         run: |
           mkdir -p mod_out
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
             INSTALL_MOD_PATH="$(pwd)/mod_out" INSTALL_MOD_STRIP=1 DEPMOD=true modules_install
           tar -czf modules.tar.gz -C mod_out .
 
