@@ -167,10 +167,11 @@ jobs:
                       lines = f.readlines()
                   changed, out_lines = False, []
                   for line in lines:
-                      stripped = line.lstrip()
-                      if stripped.startswith(("source ", "rsource ")):
-                          parts = stripped.split()
-                          if len(parts) >= 2:
+                      # Only real Kconfig directives: column 0, quoted path.
+                      # (Indented lines may be help text like "source code ...")
+                      if line.startswith(("source ", "rsource ", "osource ", "orsource ")):
+                          parts = line.split()
+                          if len(parts) >= 2 and parts[1][:1] in ("\"", "'"):
                               inc = parts[1].strip("\"'")
                               rel = os.path.join(root, inc)
                               if "$" not in inc and not os.path.exists(inc) and not os.path.exists(rel):
