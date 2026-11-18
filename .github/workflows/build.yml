@@ -16,6 +16,10 @@ on:
         description: "Apply NetHunter patches"
         type: boolean
         default: true
+      localversion:
+        description: "Kernel localversion -- MUST match the phone's stock kernel (Settings > About > Kernel version)"
+        type: string
+        default: "-g74d183918ec8"
       publish_release:
         description: "Publish a GitHub Release"
         type: boolean
@@ -32,6 +36,10 @@ env:
   # push events have no inputs -> default to true
   ENABLE_SUSFS: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_susfs }}
   ENABLE_NETHUNTER: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_nethunter }}
+  # Device: OnePlus 11 5G NA (CPH2451 / OP594DL1), crDroid 16 BP4A.251205.006,
+  # stock kernel 5.15.211-g74d183918ec8. vendor_dlkm/system_dlkm modules are built
+  # against that exact release + symbol CRCs; any mismatch = no modules = bootloop.
+  STOCK_LOCALVERSION: ${{ inputs.localversion || '-g74d183918ec8' }}
   PUBLISH_RELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
 
 jobs:
@@ -202,7 +210,7 @@ jobs:
       - name: Configure Kernel Defconfig
         run: |
           set -e
-          M=(make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu-)
+          M=(make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=)
           mkdir -p out
 
           # Same base config as the working v32 build: gki_defconfig + vendor fragments
@@ -214,6 +222,12 @@ jobs:
           done
           echo "Config fragments: $FRAGS"
           ARCH=arm64 LLVM=1 CC=clang ./scripts/kconfig/merge_config.sh -m -O out $FRAGS
+          "${M[@]}" olddefconfig
+          cp out/.config baseline.config
+
+          # Pin kernel release to the stock string (no -gHASH / -dirty / +)
+          ./scripts/config --file out/.config -d LOCALVERSION_AUTO \
+            --set-str LOCALVERSION "$STOCK_LOCALVERSION"
 
           # Faster CI build: ThinLTO, no heavy debug info
           ./scripts/config --file out/.config \
@@ -233,22 +247,37 @@ jobs:
               -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
           fi
 
-          # Filesystems + NetHunter USB/wireless
-          ./scripts/config --file out/.config \
-            -e SQUASHFS -e SQUASHFS_XZ -e SQUASHFS_ZSTD -e OVERLAY_FS -e BLK_DEV_LOOP -e EXFAT_FS \
-            -e USB_GADGET -e USB_CONFIGFS -e USB_CONFIGFS_F_HID -e USB_CONFIGFS_MASS_STORAGE \
-            -e CFG80211 -e MAC80211 -e MAC80211_MESH -e CFG80211_WEXT \
-            -e MODULES -e MODULE_UNLOAD \
-            -e WLAN -e WLAN_VENDOR_ATH -e WLAN_VENDOR_RALINK -e WLAN_VENDOR_REALTEK -e WLAN_VENDOR_MEDIATEK \
-            -m ATH9K_HTC -m RT2X00 -m RT2800USB -m RTL8187 -m MT7601U -m MT76x2U \
-            -e BT -m BT_HCIBTUSB -e BT_HCIUART \
-            -e USB_SERIAL -m USB_SERIAL_CH341 -m USB_SERIAL_CP210X -m USB_SERIAL_FTDI_SIO \
-            -e USB_ACM -e USB_USBNET -m USB_NET_AX8817X -m USB_NET_AX88179_178A -m USB_RTL8152
+          # NetHunter extras: ONLY add symbols that are currently unset, and only as
+          # modules. Never flip an existing y/m (e.g. CFG80211/MAC80211/BT are GKI
+          # modules in system_dlkm -- forcing =y breaks module loading at boot).
+          for sym in ATH9K_HTC RT2X00 RT2800USB RTL8187 MT7601U MT76x2U BT_HCIBTUSB \
+                     USB_SERIAL_CH341 USB_SERIAL_CP210X USB_SERIAL_FTDI_SIO \
+                     USB_NET_AX8817X USB_NET_AX88179_178A USB_RTL8152 USB_CONFIGFS_F_HID; do
+            if ! grep -qE "^CONFIG_${sym}=" baseline.config; then
+              ./scripts/config --file out/.config -m "$sym"
+            fi
+          done
 
           "${M[@]}" olddefconfig
           grep -q "CONFIG_64BIT=y" out/.config
           grep -q "CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU did not stick"; exit 1; }
           cp out/.config kernel.config
+
+          # ABI guard: no pre-existing symbol may change state (y<->m, or removed)
+          python3 - << 'PYEOF'
+          import re,sys
+          def load(p):
+              d={}
+              for l in open(p):
+                  m=re.match(r'^CONFIG_(\w+)=(.*)$',l)
+                  if m: d[m.group(1)]=m.group(2)
+              return d
+          b,f=load("baseline.config"),load("out/.config")
+          allowed={"LOCALVERSION","LOCALVERSION_AUTO","LTO_CLANG_FULL","LTO_CLANG_THIN","LTO_CLANG","DEBUG_INFO","DEBUG_INFO_DWARF4","DEBUG_INFO_DWARF5","DEBUG_INFO_BTF","DEBUG_INFO_BTF_MODULES","DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT","DEBUG_INFO_REDUCED","DEBUG_INFO_COMPRESSED","DEBUG_INFO_SPLIT","PAHOLE_HAS_SPLIT_BTF","MODULE_ALLOW_BTF_MISMATCH","GDB_SCRIPTS"}
+          bad=[f"{k}: {v} -> {f.get(k,'unset')}" for k,v in b.items() if k not in allowed and f.get(k)!=v and v in("y","m")]
+          for x in bad: print("::error::config changed:",x)
+          sys.exit(1 if bad else 0)
+          PYEOF
 
       - name: Compile Kernel Image & Modules
         run: |
@@ -259,7 +288,7 @@ jobs:
           # Same flags as the working v32 build
           M=(make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1
              CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++"
-             CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-DCONFIG_64BIT=1")
+             CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-DCONFIG_64BIT=1" LOCALVERSION=)
           set -o pipefail
           if ! "${M[@]}" Image modules 2>&1 | tee build.log; then
             echo "=== Build failed; compiler errors ==="
@@ -268,6 +297,12 @@ jobs:
           fi
           ccache -s
           test -f out/arch/arm64/boot/Image
+          REL=$(cat out/include/config/kernel.release)
+          echo "Built kernel release: $REL"
+          if [ "$REL" != "5.15.211${STOCK_LOCALVERSION}" ]; then
+            echo "::error::kernel.release '$REL' != stock '5.15.211${STOCK_LOCALVERSION}' -- vendor modules would not load"; exit 1
+          fi
+          strings out/arch/arm64/boot/Image | grep -qx "$REL" || { echo "::error::release string not in Image"; exit 1; }
           echo "KVER=$(make -s kernelversion)" >> "$GITHUB_ENV"
 
       - name: Upload build log on failure
@@ -283,7 +318,7 @@ jobs:
       - name: Package modules.tar.gz
         run: |
           mkdir -p mod_out
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= \
             INSTALL_MOD_PATH="$(pwd)/mod_out" INSTALL_MOD_STRIP=1 DEPMOD=true modules_install
           tar -czf modules.tar.gz -C mod_out .
 
@@ -308,6 +343,8 @@ jobs:
           device.name3=CPH2449
           device.name4=CPH2447
           device.name5=PHB110
+          device.name6=CPH2451
+          device.name7=OP594DL1
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
@@ -352,6 +389,7 @@ jobs:
             modules.tar.gz
             Nethunter-Wireless-Firmware.zip
             kernel.config
+            baseline.config
           if-no-files-found: warn
 
       - name: Publish GitHub Release
