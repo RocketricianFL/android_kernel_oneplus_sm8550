@@ -67,6 +67,20 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      # The kernel's Oplus drivers / headers / DTS are symlinks into these sibling
+      # repos (../sm8550-modules, ../sm8550-devicetrees), exactly like the crDroid
+      # source tree layout. Without them, oplus headers are missing at compile time.
+      - name: Checkout crDroid sm8550-modules and devicetrees (sibling repos)
+        run: |
+          cd "$GITHUB_WORKSPACE/.."
+          rm -rf sm8550-modules sm8550-devicetrees
+          git clone --depth=1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git sm8550-modules
+          git clone --depth=1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-devicetrees.git sm8550-devicetrees
+          cd "$GITHUB_WORKSPACE"
+          test -f drivers/power/oplus/v2/include/oplus_audio_switch.h
+          broken=$(find . -path ./.git -prune -o -xtype l -print | grep -v "^./KernelSU" | head -20)
+          if [ -n "$broken" ]; then echo "::warning::Still-broken symlinks:"; echo "$broken"; fi
+
       # Proton Clang (64-bit clang + bundled aarch64 binutils) -- same toolchain as the working v32 build.
       - name: Download Proton Clang Toolchain
         uses: actions/checkout@v4
@@ -92,7 +106,7 @@ jobs:
 
       - name: Integrate KernelSU-Next
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s
           test -d KernelSU-Next
           test -e drivers/kernelsu
           grep -q kernelsu drivers/Kconfig
