@@ -225,6 +225,12 @@ jobs:
           "${M[@]}" olddefconfig
           cp out/.config baseline.config
 
+          # system_dlkm GKI modules are signed with crDroid's private build key, which a
+          # rebuilt kernel cannot have. With MODULE_SIG_PROTECT=y they fail sig check and
+          # are refused ("exporting protected symbol") -> cascading module failures -> bootloop.
+          # Turning it off lets them load as unsigned (sig_ok stays in struct module, so ABI is unchanged).
+          ./scripts/config --file out/.config -d MODULE_SIG_PROTECT
+
           # Pin kernel release to the stock string (no -gHASH / -dirty / +)
           ./scripts/config --file out/.config -d LOCALVERSION_AUTO \
             --set-str LOCALVERSION "$STOCK_LOCALVERSION"
@@ -260,6 +266,7 @@ jobs:
 
           "${M[@]}" olddefconfig
           grep -q "CONFIG_64BIT=y" out/.config
+          ! grep -q "^CONFIG_MODULE_SIG_PROTECT=y" out/.config || { echo "::error::MODULE_SIG_PROTECT still on"; exit 1; }
           grep -q "CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU did not stick"; exit 1; }
           cp out/.config kernel.config
 
@@ -273,7 +280,7 @@ jobs:
                   if m: d[m.group(1)]=m.group(2)
               return d
           b,f=load("baseline.config"),load("out/.config")
-          allowed={"LOCALVERSION","MODULE_SCMVERSION","LOCALVERSION_AUTO","LTO_CLANG_FULL","LTO_CLANG_THIN","LTO_CLANG","DEBUG_INFO","DEBUG_INFO_DWARF4","DEBUG_INFO_DWARF5","DEBUG_INFO_BTF","DEBUG_INFO_BTF_MODULES","DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT","DEBUG_INFO_REDUCED","DEBUG_INFO_COMPRESSED","DEBUG_INFO_SPLIT","PAHOLE_HAS_SPLIT_BTF","MODULE_ALLOW_BTF_MISMATCH","GDB_SCRIPTS"}
+          allowed={"MODULE_SIG_PROTECT","LOCALVERSION","MODULE_SCMVERSION","LOCALVERSION_AUTO","LTO_CLANG_FULL","LTO_CLANG_THIN","LTO_CLANG","DEBUG_INFO","DEBUG_INFO_DWARF4","DEBUG_INFO_DWARF5","DEBUG_INFO_BTF","DEBUG_INFO_BTF_MODULES","DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT","DEBUG_INFO_REDUCED","DEBUG_INFO_COMPRESSED","DEBUG_INFO_SPLIT","PAHOLE_HAS_SPLIT_BTF","MODULE_ALLOW_BTF_MISMATCH","GDB_SCRIPTS"}
           bad=[f"{k}: {v} -> {f.get(k,'unset')}" for k,v in b.items() if k not in allowed and f.get(k)!=v and v in("y","m")]
           for x in bad: print("::error::config changed:",x)
           sys.exit(1 if bad else 0)
@@ -288,7 +295,7 @@ jobs:
           # Same flags as the working v32 build
           M=(make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1
              CC="ccache clang" HOSTCC="ccache gcc" HOSTCXX="ccache g++"
-             CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-DCONFIG_64BIT=1" LOCALVERSION=)
+             CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=)
           set -o pipefail
           if ! "${M[@]}" Image modules 2>&1 | tee build.log; then
             echo "=== Build failed; compiler errors ==="
