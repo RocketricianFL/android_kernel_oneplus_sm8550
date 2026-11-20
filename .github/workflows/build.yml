@@ -89,28 +89,25 @@ jobs:
           broken=$(find . -path ./.git -prune -o -xtype l -print | grep -v "^./KernelSU" | head -20)
           if [ -n "$broken" ]; then echo "::warning::Still-broken symlinks:"; echo "$broken"; fi
 
-      # Proton Clang (64-bit clang + bundled aarch64 binutils) -- same toolchain as the working v32 build.
-      - name: Download Proton Clang Toolchain
-        uses: actions/checkout@v4
-        with:
-          repository: kdrag0n/proton-clang
-          path: clang-toolchain
-          fetch-depth: 1
-
-      - name: Link Clang Toolchain
+      # AOSP Clang r450784e -- the exact compiler in build.config.constants that built the
+      # stock 5.15.211-g74d183918ec8 kernel and vendor_dlkm modules. CONFIG_CFI_CLANG=y, so a
+      # different compiler (e.g. Proton Clang) yields CFI type mismatches -> panic -> bootloop.
+      - name: Download AOSP Clang r450784e
         run: |
-          mv clang-toolchain "$HOME/clang"
+          set -e
+          mkdir -p "$HOME/clang"
+          curl -fLSs --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz" | tar -xz -C "$HOME/clang"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version | head -1
-          ls "$HOME/clang/bin" | grep -E "aarch64-linux-gnu-(as|ld)$"
+          "$HOME/clang/bin/clang" --version | grep -q "450784" || { echo "::error::wrong clang"; exit 1; }
 
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-op11-crdroid16-${{ github.sha }}
+          key: ccache-op11-crdroid16-r450784e-${{ github.sha }}
           restore-keys: |
-            ccache-op11-crdroid16-
+            ccache-op11-crdroid16-r450784e-
 
       - name: Integrate KernelSU-Next
         run: |
